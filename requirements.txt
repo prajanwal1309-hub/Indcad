@@ -1,0 +1,5 @@
+flask
+stripe
+reportlab
+python-dotenv
+gunicorn
