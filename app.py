@@ -1,3 +1,4 @@
+# app.py — IndCad backend (cleaned)
 import os
 import json
 import uuid
@@ -9,33 +10,27 @@ import stripe
 from dotenv import load_dotenv
 from flask_cors import CORS
 
-# after app = Flask(__name__)
-app = Flask(__name__)
-@app.route("/health", methods=["GET"])
-def health():
-    return {"status": "ok"}, 200
-
-CORS(app, resources={r"/*": {"origins": "*"}})  # permissive for local testing
-
-
+# ---- config ----
 load_dotenv()  # optional .env support
 
 STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY")
-BASE_URL = os.getenv("BASE_URL", "http://localhost:5000")
+BASE_URL = os.getenv("BASE_URL", "http://localhost:5001")  # matches your dev port by default
 
 if not STRIPE_SECRET_KEY:
-    raise RuntimeError("Set STRIPE_SECRET_KEY environment variable")
+    # Development convenience: fail loudly so you set it. If you want to bypass, set to 'test' explicitly.
+    raise RuntimeError("Set STRIPE_SECRET_KEY environment variable (from Stripe dashboard).")
 
 stripe.api_key = STRIPE_SECRET_KEY
 
+# ---- app ----
 app = Flask(__name__)
+CORS(app, resources={r"/*": {"origins": "*"}})  # permissive for local testing
 
 # In-memory orders store: order_id -> payload dict
 ORDERS = {}
 
-# Utility: create human-friendly text summary from payload
+# ---- helpers ----
 def summarize_payload(payload):
-    # Keep it short and readable; you can expand fields later
     parts = []
     parts.append(f"Age: {payload.get('age', 'N/A')}")
     parts.append(f"Education: {payload.get('education_level', payload.get('education','N/A'))}")
@@ -49,7 +44,6 @@ def summarize_payload(payload):
         parts.append("Provincial nomination: YES")
     return "\n".join(parts)
 
-# PDF generator using reportlab
 def generate_pdf_bytes(order_id, payload, crs_result=None):
     buffer = BytesIO()
     p = canvas.Canvas(buffer, pagesize=A4)
@@ -83,7 +77,7 @@ def generate_pdf_bytes(order_id, payload, crs_result=None):
     p.setFont("Helvetica", 10)
     summary = summarize_payload(payload)
     for line in summary.splitlines():
-        if y < margin+50:
+        if y < margin + 50:
             p.showPage()
             y = height - margin
             p.setFont("Helvetica", 10)
@@ -96,10 +90,9 @@ def generate_pdf_bytes(order_id, payload, crs_result=None):
     y -= 16
     p.setFont("Helvetica", 10)
 
-    # Use computeSuggestions-like heuristics or accept suggestions from payload
+    # Use suggestions from payload if present
     suggestions = payload.get('_suggestions') or payload.get('suggestions') or []
     if not suggestions and crs_result:
-        # minimal fallback
         suggestions = [
             {"title":"Take PNP route","desc":"Check PNP streams you qualify for."},
             {"title":"Improve primary language","desc":"Retake and target higher CLB."},
@@ -109,7 +102,7 @@ def generate_pdf_bytes(order_id, payload, crs_result=None):
     for s in suggestions:
         title = s.get('title') if isinstance(s, dict) else str(s)
         desc = s.get('desc') if isinstance(s, dict) else ''
-        if y < margin+60:
+        if y < margin + 60:
             p.showPage()
             y = height - margin
             p.setFont("Helvetica", 10)
@@ -122,13 +115,17 @@ def generate_pdf_bytes(order_id, payload, crs_result=None):
             y -= 12
         y -= 6
 
-    # Footer
+    # Footer (finalize)
     p.showPage()
     p.save()
     buffer.seek(0)
     return buffer
 
-# Create order: stores payload and returns order_id
+# ---- routes ----
+@app.route("/health", methods=["GET"])
+def health():
+    return jsonify({"status": "ok"}), 200
+
 @app.route("/create_order", methods=["POST"])
 def create_order():
     data = request.get_json(force=True)
@@ -139,17 +136,20 @@ def create_order():
         "payload": data,
         "created_at": None
     }
+    # return order id so frontend can call create_checkout
     return jsonify({"order_id": order_id}), 200
 
-# Create Stripe Checkout session
 @app.route("/create_checkout", methods=["POST"])
 def create_checkout():
     data = request.get_json(force=True)
+    if not data:
+        return jsonify({"error": "missing payload"}), 400
+
     order_id = data.get("order_id")
     if not order_id or order_id not in ORDERS:
         return jsonify({"error":"invalid order id"}), 400
 
-    # amount in paisa (₹499 => 49900 paisa)
+    # amount in paise (₹499 => 49900 paise)
     amount = 49900
     try:
         session = stripe.checkout.Session.create(
@@ -170,23 +170,20 @@ def create_checkout():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-    return jsonify({"checkout_url": session.url, "session_id": session.id})
+    return jsonify({"checkout_url": session.url, "session_id": session.id}), 200
 
-# Download endpoint — verify payment then generate PDF
 @app.route("/download", methods=["GET"])
 def download():
-    session_id = request.args.get("session_id")
+    session_id = request.args.get("session_id") or request.args.get("order_id")
     if not session_id:
         return jsonify({"error":"missing session_id"}), 400
 
-    # retrieve session
+    # retrieve session from Stripe
     try:
         session = stripe.checkout.Session.retrieve(session_id)
     except Exception as e:
         return jsonify({"error":"invalid session id", "details": str(e)}), 400
 
-    # verify payment
-    # session.payment_status can be "paid" if successful
     if session.payment_status != "paid":
         return jsonify({"error":"payment not completed"}), 402
 
@@ -196,18 +193,16 @@ def download():
 
     order = ORDERS[order_id]
     payload = order["payload"]
+    crs_result = payload.get('crs_result')
 
-    # Optionally compute CRS server-side if you want: if client sent 'crs_result', use it; else compute here.
-    crs_result = payload.get('crs_result')  # optional
     pdf_io = generate_pdf_bytes(order_id, payload, crs_result=crs_result)
-
     filename = f"IndCad_CRS_Report_{order_id}.pdf"
+    # download_name works on modern Flask/Werkzeug; fallback to attachment_filename for older versions if needed
     return send_file(pdf_io, as_attachment=True, download_name=filename, mimetype="application/pdf")
 
-# Simple success landing page (redirect from Stripe) — optional
 @app.route("/download-success", methods=["GET"])
 def download_success_page():
-    # This endpoint is the redirect target from Stripe. The frontend can read session_id param and call /download.
+    # Redirect target from Stripe — frontend can read session_id and call /download
     return """
     <html><body>
     <h3>Payment successful</h3>
@@ -216,49 +211,14 @@ def download_success_page():
       const params = new URLSearchParams(window.location.search);
       const sid = params.get('session_id');
       if (sid) {
-        // automatically start download
         window.location.href = `/download?session_id=${sid}`;
       }
     </script>
-    <a id="dl" href="/">Return</a>
+    <a href="/">Return</a>
     </body></html>
     """
-@app.route("/health", methods=["GET"])
-def health():
-    return {"status": "ok"}, 200
 
+# ---- main ----
 if __name__ == "__main__":
+    # use port 5001 (your dev choice). Use debug=True for development only.
     app.run(host="0.0.0.0", port=5001, debug=True)
-@app.route("/create_checkout", methods=["POST"])
-def create_checkout():
-    data = request.json
-    order_id = data.get("order_id")
-
-    if not order_id:
-        return jsonify({"error": "order_id missing"}), 400
-
-    try:
-        # Stripe Checkout Session
-        session = stripe.checkout.Session.create(
-            payment_method_types=["card"],
-            mode="payment",
-            line_items=[{
-                "price_data": {
-                    "currency": "inr",
-                    "product_data": {
-                        "name": "IndCad PDF CRS Report",
-                        "description": "Personalized CRS improvement plan generated from your profile"
-                    },
-                    "unit_amount": 49900  # ₹499 → 49900 paise
-                },
-                "quantity": 1
-            }],
-            success_url="http://localhost:5001/download?order_id={CHECKOUT_SESSION_ID}",
-            cancel_url="http://localhost:5001/cancel",
-            metadata={"order_id": order_id}
-        )
-
-        return jsonify({"checkout_url": session.url})
-
-    except Exception as e:
-        return jsonify({"error": str(e)})
