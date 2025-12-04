@@ -1,8 +1,9 @@
-# app.py — IndCad backend (Postgres-ready, SQLAlchemy)
+# app.py — IndCad backend (Postgres-ready, SQLAlchemy Core)
 import os
 import json
 import uuid
 import io
+import logging
 from datetime import datetime
 from flask import Flask, request, jsonify, send_file
 from reportlab.lib.pagesizes import A4
@@ -11,18 +12,23 @@ import stripe
 from dotenv import load_dotenv
 from flask_cors import CORS
 from sqlalchemy import create_engine, MetaData, Table, Column, String, Integer, Boolean, Text, select, insert, update
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import SQLAlchemyError
 
 # ---- config ----
 load_dotenv()
 
+# Logging
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger("indcad")
+
 STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY")
 STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
 BASE_URL = os.getenv("BASE_URL", "http://localhost:5001")
-DATABASE_URL = os.getenv("DATABASE_URL")  # e.g. postgres://user:pass@host:5432/dbname
+DATABASE_URL = os.getenv("DATABASE_URL")  # required for Postgres
 DEFAULT_PRICE_CENTS = int(os.getenv("DEFAULT_PRICE_CENTS", "49900"))
 DEFAULT_CURRENCY = os.getenv("DEFAULT_CURRENCY", "inr")
 DEBUG_SHOW_ORDERS = os.getenv("DEBUG_SHOW_ORDERS", "0") == "1"
+ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "local-admin-token")
 
 if not STRIPE_SECRET_KEY:
     raise RuntimeError("Set STRIPE_SECRET_KEY environment variable.")
@@ -36,7 +42,8 @@ app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}})
 
 # ---- DB setup (SQLAlchemy Core) ----
-engine = create_engine(DATABASE_URL, future=True)
+# Use pool_pre_ping to reduce "stale connection" errors on platforms like Render
+engine = create_engine(DATABASE_URL, future=True, pool_pre_ping=True)
 metadata = MetaData()
 
 orders = Table(
@@ -54,8 +61,14 @@ orders = Table(
 )
 
 def init_db():
-    metadata.create_all(engine)
+    try:
+        metadata.create_all(engine)
+        log.info("DB initialized / tables ensured")
+    except Exception as e:
+        log.exception("Failed to initialize DB: %s", e)
+        raise
 
+# ---- DB helpers ----
 def insert_order_db(order_id, payload, amount_cents=None, currency=None):
     stmt = insert(orders).values(
         id=order_id,
@@ -74,8 +87,11 @@ def get_order_db(order_id):
     if not row:
         return None
     rec = dict(row)
-    rec['payload'] = json.loads(rec['payload'])
-    rec['paid'] = bool(rec['paid'])
+    try:
+        rec['payload'] = json.loads(rec['payload'])
+    except Exception:
+        rec['payload'] = {"_raw": rec['payload']}
+    rec['paid'] = bool(rec.get('paid'))
     return rec
 
 def find_order_by_session_db(session_id):
@@ -85,16 +101,23 @@ def find_order_by_session_db(session_id):
     if not row:
         return None
     rec = dict(row)
-    rec['payload'] = json.loads(rec['payload'])
-    rec['paid'] = bool(rec['paid'])
+    try:
+        rec['payload'] = json.loads(rec['payload'])
+    except Exception:
+        rec['payload'] = {"_raw": rec['payload']}
+    rec['paid'] = bool(rec.get('paid'))
     return rec
 
 def update_order_stripe_session_db(order_id, stripe_session_id=None, payment_intent=None, paid=False):
     updates = {}
     if stripe_session_id is not None:
-        updates['stripe_session_id'] = str(stripe_session_id)
+        # coerce to primitive
+        if isinstance(stripe_session_id, dict):
+            stripe_session_id = stripe_session_id.get("id")
+        if hasattr(stripe_session_id, "id"):
+            stripe_session_id = getattr(stripe_session_id, "id")
+        updates['stripe_session_id'] = str(stripe_session_id) if stripe_session_id is not None else None
     if payment_intent is not None:
-        # payment_intent may be a dict if expanded: extract id
         if isinstance(payment_intent, dict):
             payment_intent = payment_intent.get("id")
         if hasattr(payment_intent, "id"):
@@ -109,7 +132,7 @@ def update_order_stripe_session_db(order_id, stripe_session_id=None, payment_int
     with engine.begin() as conn:
         conn.execute(stmt)
 
-# ---- PDF helpers (kept from your version) ----
+# ---- PDF helpers ----
 def summarize_payload(payload):
     parts = []
     parts.append(f"Age: {payload.get('age', 'N/A')}")
@@ -141,12 +164,16 @@ def generate_pdf_bytes(order_id, payload, crs_result=None):
     y -= 22
 
     if crs_result:
-        p.setFont("Helvetica-Bold", 12)
-        p.drawString(margin, y, f"Estimated CRS Score: {crs_result.get('total')}")
-        y -= 18
-        p.setFont("Helvetica", 10)
-        p.drawString(margin, y, f"Breakdown — Core: {crs_result['totals']['core']}, Spouse: {crs_result['totals']['spouse']}, Skill: {crs_result['totals']['skill']}, Additional: {crs_result['totals']['additional']}")
-        y -= 22
+        try:
+            totals = crs_result.get('totals', {})
+            p.setFont("Helvetica-Bold", 12)
+            p.drawString(margin, y, f"Estimated CRS Score: {crs_result.get('total')}")
+            y -= 18
+            p.setFont("Helvetica", 10)
+            p.drawString(margin, y, f"Breakdown — Core: {totals.get('core')}, Spouse: {totals.get('spouse')}, Skill: {totals.get('skill')}, Additional: {totals.get('additional')}")
+            y -= 22
+        except Exception:
+            y -= 0
 
     p.setFont("Helvetica-Bold", 12)
     p.drawString(margin, y, "Profile Summary")
@@ -207,7 +234,12 @@ def create_order():
     if not data:
         return jsonify({"error":"missing payload"}), 400
     order_id = str(uuid.uuid4())
-    insert_order_db(order_id, data, amount_cents=None, currency=None)
+    try:
+        insert_order_db(order_id, data, amount_cents=None, currency=None)
+        log.info("Created order %s", order_id)
+    except SQLAlchemyError as e:
+        log.exception("Failed to insert order")
+        return jsonify({"error":"db_error","details": str(e)}), 500
     return jsonify({"order_id": order_id}), 200
 
 @app.route("/create_checkout", methods=["POST"])
@@ -242,9 +274,15 @@ def create_checkout():
             metadata={"order_id": order_id}
         )
     except Exception as e:
+        log.exception("Stripe session creation failed")
         return jsonify({"error": str(e)}), 500
 
-    update_order_stripe_session_db(order_id, stripe_session_id=session.id, payment_intent=session.get("payment_intent"))
+    try:
+        update_order_stripe_session_db(order_id, stripe_session_id=session.id, payment_intent=session.get("payment_intent"))
+        log.info("Checkout created for order %s -> %s", order_id, session.id)
+    except SQLAlchemyError:
+        log.exception("Failed to update order with stripe session")
+        # continue returning session so user can still complete payment
     return jsonify({"checkout_url": session.url, "session_id": session.id}), 200
 
 @app.route("/download-success", methods=["GET"])
@@ -257,6 +295,7 @@ def download_success_page():
       const params = new URLSearchParams(window.location.search);
       const sid = params.get('session_id');
       if (sid) {
+        // ensure redirect uses same origin
         window.location.href = window.location.origin + '/download?session_id=' + sid;
       }
     </script>
@@ -273,8 +312,10 @@ def download():
     try:
         session = stripe.checkout.Session.retrieve(session_id, expand=["payment_intent"])
     except stripe.error.InvalidRequestError as e:
+        log.exception("Invalid session id on download")
         return jsonify({"error":"invalid session id", "details": str(e)}), 400
     except Exception as e:
+        log.exception("Stripe error on retrieve")
         return jsonify({"error":"stripe error", "details": str(e)}), 500
 
     if session.payment_status != "paid":
@@ -287,13 +328,18 @@ def download():
             order_id = rec["id"]
 
     if not order_id:
+        log.error("Order id not found for session %s", session.id)
         return jsonify({"error":"order not found for this session", "session_id": session.id}), 404
 
     order = get_order_db(order_id)
     if not order:
+        log.error("Order lookup failed for id %s", order_id)
         return jsonify({"error":"order not found by id", "order_id": order_id}), 404
 
-    update_order_stripe_session_db(order_id, stripe_session_id=session.id, payment_intent=session.get("payment_intent"), paid=True)
+    try:
+        update_order_stripe_session_db(order_id, stripe_session_id=session.id, payment_intent=session.get("payment_intent"), paid=True)
+    except SQLAlchemyError:
+        log.exception("Failed to mark order paid")
 
     payload = order["payload"]
     crs_result = payload.get("crs_result")
@@ -310,16 +356,19 @@ def stripe_webhook():
         try:
             event = stripe.Webhook.construct_event(payload, sig_header, STRIPE_WEBHOOK_SECRET)
         except Exception as e:
+            log.exception("Webhook signature verification failed")
             return jsonify({"error":"signature verification failed", "details": str(e)}), 400
     else:
         try:
             event = json.loads(payload)
         except Exception as e:
+            log.exception("Invalid webhook payload")
             return jsonify({"error":"invalid payload", "details": str(e)}), 400
 
     typ = event.get("type")
     obj = event.get("data", {}).get("object", {})
 
+    # checkout.session.completed
     if typ == "checkout.session.completed":
         session = obj
         sess_id = session.get("id")
@@ -327,9 +376,17 @@ def stripe_webhook():
         payment_intent = session.get("payment_intent")
         if order_id:
             if not get_order_db(order_id):
-                insert_order_db(order_id, {"note":"created-from-webhook"}, amount_cents=session.get("amount_total"), currency=session.get("currency"))
-            update_order_stripe_session_db(order_id, stripe_session_id=sess_id, payment_intent=payment_intent, paid=True)
+                # best-effort create a stub if missing (rare)
+                try:
+                    insert_order_db(order_id, {"note":"created-from-webhook"}, amount_cents=session.get("amount_total"), currency=session.get("currency"))
+                except SQLAlchemyError:
+                    log.exception("Failed to create stub order from webhook")
+            try:
+                update_order_stripe_session_db(order_id, stripe_session_id=sess_id, payment_intent=payment_intent, paid=True)
+            except SQLAlchemyError:
+                log.exception("Failed to update order from webhook for order %s", order_id)
         else:
+            # fallback: find a non-attached order by amount
             try:
                 amount = session.get("amount_total")
                 if amount:
@@ -340,20 +397,24 @@ def stripe_webhook():
                             oid = row[0]
                             update_order_stripe_session_db(oid, stripe_session_id=sess_id, payment_intent=payment_intent, paid=True)
             except Exception:
-                pass
+                log.exception("Failed to attach webhook session to an order by amount")
 
+    # payment_intent.succeeded
     if typ == "payment_intent.succeeded":
         pi = obj
         pi_id = pi.get("id")
-        with engine.begin() as conn:
-            res = conn.execute(select(orders.c.id).where((orders.c.payment_intent == pi_id) | (orders.c.stripe_session_id == pi_id)).limit(1))
-            row = res.fetchone()
-            if row:
-                update_order_stripe_session_db(row[0], paid=True)
+        try:
+            with engine.begin() as conn:
+                res = conn.execute(select(orders.c.id).where((orders.c.payment_intent == pi_id) | (orders.c.stripe_session_id == pi_id)).limit(1))
+                row = res.fetchone()
+                if row:
+                    update_order_stripe_session_db(row[0], paid=True)
+        except Exception:
+            log.exception("Failed to mark order paid on payment_intent.succeeded")
 
     return jsonify({"received": True}), 200
 
-# debug endpoint (opt-in)
+# debug/admin endpoint (opt-in)
 if DEBUG_SHOW_ORDERS:
     @app.route("/_debug_orders", methods=["GET"])
     def debug_orders():
@@ -361,11 +422,50 @@ if DEBUG_SHOW_ORDERS:
             res = conn.execute(select(orders).order_by(orders.c.created_at.desc()).limit(200))
             rows = [dict(r) for r in res.fetchall()]
         for r in rows:
-            r['payload'] = json.loads(r['payload'])
-            r['paid'] = bool(r['paid'])
+            try:
+                r['payload'] = json.loads(r['payload'])
+            except Exception:
+                r['payload'] = {"_raw": r['payload']}
+            r['paid'] = bool(r.get('paid'))
         return jsonify(rows), 200
+
+    @app.route("/admin/orders", methods=["GET"])
+    def admin_orders():
+        # restrict to localhost for extra safety
+        if request.remote_addr not in ("127.0.0.1", "localhost", "::1"):
+            return "Forbidden", 403
+        token = request.args.get("admin_token", "")
+        if token != ADMIN_TOKEN:
+            return "Unauthorized - provide ?admin_token=...", 401
+        with engine.connect() as conn:
+            res = conn.execute(select(orders).order_by(orders.c.created_at.desc()).limit(200))
+            rows = [dict(r) for r in res.fetchall()]
+        rows_html = ""
+        for r in rows:
+            oid = r["id"]
+            sess = r.get("stripe_session_id") or ""
+            pi = r.get("payment_intent") or ""
+            paid = "YES" if r.get("paid") else "NO"
+            paid_at = r.get("paid_at") or ""
+            amt = str(r.get("amount_cents") or "")
+            download_link = f"/download?session_id={sess}" if sess else ""
+            rows_html += f"<tr><td>{oid}</td><td>{amt}</td><td>{sess}</td><td>{pi}</td><td>{paid}</td><td>{paid_at}</td><td><a href='{download_link}'>download</a></td></tr>"
+        html_page = f"""
+        <html><head><meta charset='utf-8'><title>IndCad — Admin Orders</title>
+        <style>table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ddd;padding:8px}}th{{background:#0B6E4F;color:white}}</style>
+        </head><body>
+        <h2>Orders (dev view)</h2>
+        <p>Access restricted to localhost & token.</p>
+        <table>
+          <thead><tr><th>Order ID</th><th>Amount (cents)</th><th>Stripe Session</th><th>Payment Intent</th><th>Paid</th><th>Paid At</th><th>Actions</th></tr></thead>
+          <tbody>{rows_html}</tbody>
+        </table>
+        </body></html>
+        """
+        return html_page
 
 if __name__ == "__main__":
     init_db()
     port = int(os.getenv("PORT", "5001"))
+    log.info("Starting IndCad on port %s", port)
     app.run(host="0.0.0.0", port=port, debug=True)
