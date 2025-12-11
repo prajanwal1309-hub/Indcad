@@ -1,0 +1,16 @@
+2025-12-11 11:23:59,027 INFO Starting IndCad app.
+2025-12-11 11:23:59,176 INFO Loaded 515 NOC entries.
+2025-12-11 11:23:59,188 INFO [31m[1mWARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.[0m
+ * Running on all addresses (0.0.0.0)
+ * Running on http://127.0.0.1:5001
+ * Running on http://192.168.29.207:5001
+2025-12-11 11:23:59,188 INFO [33mPress CTRL+C to quit[0m
+2025-12-11 11:24:45,433 INFO 127.0.0.1 - - [11/Dec/2025 11:24:45] "GET /health HTTP/1.1" 200 -
+2025-12-11 11:27:43,751 INFO Starting IndCad app.
+2025-12-11 11:27:43,751 INFO Starting IndCad app.
+2025-12-11 11:27:43,751 INFO Starting IndCad app.
+2025-12-11 11:27:43,751 INFO Starting IndCad app.
+2025-12-11 11:27:43,906 INFO Loaded 515 NOC entries.
+2025-12-11 11:27:43,908 INFO Loaded 515 NOC entries.
+2025-12-11 11:27:43,912 INFO Loaded 515 NOC entries.
+2025-12-11 11:27:43,913 INFO Loaded 515 NOC entries.
