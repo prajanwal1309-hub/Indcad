@@ -228,25 +228,3 @@ def match_by_title(title: str, top_k: int = 5):
         })
 
     return out
-if __name__ == "__main__":
-    print("=== TITLE TEST: PLUMBER ===")
-    r1 = match_by_title("plumber", top_k=1)
-    print(r1[0]["title"])
-    print(r1[0]["noc"])
-    print(r1[0]["teer"])
-    print("DUTIES:\n", r1[0]["duties_snippet"])
-    print("-" * 60)
-
-    print("=== TITLE TEST: SOFTWARE ENGINEER ===")
-    r2 = match_by_title("software engineer", top_k=1)
-    print(r2[0]["title"])
-    print(r2[0]["noc"])
-    print(r2[0]["teer"])
-    print("DUTIES:\n", r2[0]["duties_snippet"])
-    print("-" * 60)
-
-    print("=== DUTIES SEARCH TEST ===")
-    r3 = match_query("design, develop and maintain software applications", top_k=1)
-    print(r3[0]["title"])
-    print(r3[0]["noc"])
-    print("DUTIES:\n", r3[0]["duties_snippet"])
