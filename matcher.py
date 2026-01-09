@@ -2,77 +2,72 @@
 import re
 import difflib
 import numpy as np
+from functools import lru_cache
+
 from noc_db import load_noc_entries
 from embeddings import load_embeddings, load_faiss, client as embeddings_client
 import config
 
+
 # -----------------------
-# Helper functions
+# Helpers
 # -----------------------
 
-def make_official_noc_link(entry):
-    if entry.get("source_file_url"):
-        return entry["source_file_url"]
-
-    noc = str(entry.get("noc", "")).strip()
-    noc_digits = "".join(ch for ch in noc if ch.isdigit())
-    if not noc_digits:
-        return ""
-
-    return f"https://noc.esdc.gc.ca/Structure/NOCProfile?code={noc_digits}&version=2021.0"
-
-
-def normalize_text(s):
+def normalize_text(s: str) -> str:
     s = (s or "").lower().strip()
-    s = re.sub(r'[^a-z0-9 ]+', ' ', s)
-    s = re.sub(r'\s+', ' ', s)
+    s = re.sub(r"[^a-z0-9 ]+", " ", s)
+    s = re.sub(r"\s+", " ", s)
     return s
 
 
-def string_similarity(a, b):
+def string_similarity(a: str, b: str) -> float:
+    if not a or not b:
+        return 0.0
     return difflib.SequenceMatcher(None, a, b).ratio()
 
 
-def extract_employment_requirements(entry):
+def build_full_description(entry: dict) -> str:
     """
-    Try common keys. If not present, return empty string.
+    Build FULL readable text:
+    - Duties
+    - Employment requirements
     """
-    return (
-        entry.get("employment_requirements")
-        or entry.get("requirements")
-        or entry.get("employment")
-        or ""
-    )
+    duties = entry.get("duties", "").strip()
+    employment = entry.get("employment_requirements", "").strip()
+
+    out = []
+    if duties:
+        out.append("Duties:\n" + duties)
+    if employment:
+        out.append("\nEmployment requirements:\n" + employment)
+
+    return "\n\n".join(out).strip()
+
 
 # -----------------------
-# Index build wrapper
+# Index check
 # -----------------------
 
 def prepare_and_build_index(force_rebuild=False):
     entries = load_noc_entries()
-    texts = [e.get("duties", "") for e in entries]
-
-    if not texts:
+    if not entries:
         raise SystemExit("No NOC entries found.")
 
-    existing = load_embeddings()
-    if existing and not force_rebuild:
-        idx = load_faiss()
-        if idx is not None:
-            return entries
+    if load_embeddings() and load_faiss():
+        return entries
 
     raise SystemExit(
-        "Embeddings missing. Run rebuild_index.sh to create embeddings and FAISS index."
+        "Embeddings missing. Run rebuild_index.sh before starting server."
     )
 
+
 # -----------------------
-# Match by duties (embedding search)
+# Match by duties (semantic)
 # -----------------------
 
 def match_query(query: str, top_k=None):
     top_k = top_k or config.TOP_K
     entries = load_noc_entries()
-
     if not entries:
         return []
 
@@ -80,8 +75,8 @@ def match_query(query: str, top_k=None):
         model=config.OPENAI_MODEL,
         input=[query]
     )
-
     qvec = np.array(resp.data[0].embedding, dtype="float32")
+
     index = load_faiss()
 
     results = []
@@ -93,19 +88,16 @@ def match_query(query: str, top_k=None):
 
         for score, idx in zip(D[0], I[0]):
             e = entries[int(idx)]
-
             results.append({
-                "job_name": e.get("title", ""),
-                "noc_code": e.get("noc", ""),
+                "title": e.get("title", ""),
+                "noc": e.get("noc", ""),
                 "teer": e.get("teer", ""),
-                "duties": e.get("duties", ""),
-                "employment_requirements": extract_employment_requirements(e),
-                "official_noc_link": make_official_noc_link(e)
+                "score": float(score),
+                "duties_snippet": build_full_description(e)
             })
-
         return results
 
-    # Fallback (no FAISS)
+    # fallback (no FAISS)
     vecs = load_embeddings()
     if not vecs:
         return []
@@ -120,18 +112,18 @@ def match_query(query: str, top_k=None):
     for i in idxs:
         e = entries[int(i)]
         results.append({
-            "job_name": e.get("title", ""),
-            "noc_code": e.get("noc", ""),
+            "title": e.get("title", ""),
+            "noc": e.get("noc", ""),
             "teer": e.get("teer", ""),
-            "duties": e.get("duties", ""),
-            "employment_requirements": extract_employment_requirements(e),
-            "official_noc_link": make_official_noc_link(e)
+            "score": float(scores[i]),
+            "duties_snippet": build_full_description(e)
         })
 
     return results
 
+
 # -----------------------
-# Match by title (string + embedding)
+# Match by title (exact + fuzzy)
 # -----------------------
 
 def match_by_title(title: str, top_k: int = 5):
@@ -140,33 +132,32 @@ def match_by_title(title: str, top_k: int = 5):
         return []
 
     n_title = normalize_text(title)
-    results = []
 
-    # Exact / related match first
+    # Exact / related title match
+    exact = []
     for e in entries:
-        title_norm = normalize_text(e.get("title", ""))
-        related_norms = [normalize_text(r) for r in e.get("related_titles", [])]
+        tnorm = normalize_text(e.get("title", ""))
+        related = [normalize_text(r) for r in e.get("related_titles", [])]
 
-        if n_title == title_norm or n_title in related_norms:
-            results.append({
-                "job_name": e.get("title", ""),
-                "noc_code": e.get("noc", ""),
+        if n_title == tnorm or n_title in related:
+            exact.append({
+                "title": e.get("title", ""),
+                "noc": e.get("noc", ""),
                 "teer": e.get("teer", ""),
-                "duties": e.get("duties", ""),
-                "employment_requirements": extract_employment_requirements(e),
-                "official_noc_link": make_official_noc_link(e)
+                "score": 1.0,
+                "duties_snippet": build_full_description(e)
             })
 
-    if results:
+    if exact:
         seen = set()
-        deduped = []
-        for r in results:
-            if r["noc_code"] not in seen:
-                deduped.append(r)
-                seen.add(r["noc_code"])
-        return deduped[:top_k]
+        out = []
+        for r in exact:
+            if r["noc"] not in seen:
+                out.append(r)
+                seen.add(r["noc"])
+        return out[:top_k]
 
-    # Fuzzy + embedding fallback
+    # Fuzzy scoring
     scored = []
 
     for e in entries:
@@ -178,19 +169,28 @@ def match_by_title(title: str, top_k: int = 5):
             [string_similarity(n_title, normalize_text(r)) for r in rels] + [0]
         )
 
-        string_score = max(sscore, relscore)
-        scored.append((string_score, e))
+        combined = max(sscore, relscore)
+        scored.append((combined, e))
 
     scored.sort(key=lambda x: x[0], reverse=True)
 
-    for _, e in scored[:top_k]:
-        results.append({
-            "job_name": e.get("title", ""),
-            "noc_code": e.get("noc", ""),
+    out = []
+    for score, e in scored[:top_k]:
+        out.append({
+            "title": e.get("title", ""),
+            "noc": e.get("noc", ""),
             "teer": e.get("teer", ""),
-            "duties": e.get("duties", ""),
-            "employment_requirements": extract_employment_requirements(e),
-            "official_noc_link": make_official_noc_link(e)
+            "score": float(score),
+            "duties_snippet": build_full_description(e)
         })
 
-    return results
+    return out
+
+
+# -----------------------
+# Cached wrapper
+# -----------------------
+
+@lru_cache(maxsize=2048)
+def match_by_title_cached(title: str, top_k: int = 5):
+    return match_by_title(title, top_k)
