@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>IndCad — NOC / TEER Finder</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    body { margin:0; background:#f7f7f7; font-family:Inter, Arial, sans-serif; }
+    #indcad-widget { max-width:900px; margin:28px auto; padding:14px; }
+    .indcad-card { background:#fff; padding:18px; border-radius:14px; box-shadow:0 6px 20px rgba(11,110,79,0.06); margin-bottom:18px; }
+    .indcad-row { display:flex; gap:12px; align-items:center; }
+    .indcad-col { flex:1; }
+    .indcad-input, .indcad-textarea { width:100%; padding:10px 12px; border:1px solid #e9ecef; border-radius:10px; font-size:15px; box-sizing:border-box; }
+    .indcad-textarea { min-height:110px; resize:vertical; }
+    .indcad-btn { background:#0B6E4F; color:#fff; border:none; padding:10px 14px; border-radius:10px; cursor:pointer; font-weight:700; }
+    .indcad-btn.secondary { background:#FF6B35; }
+    .indcad-small { font-size:13px; color:#666; }
+    .indcad-results { margin-top:18px; display:grid; gap:12px; }
+    .indcad-item { border:1px solid #f1f3f5; border-radius:10px; padding:14px; display:flex; justify-content:space-between; gap:12px; background:linear-gradient(180deg,#fff,#fbfffb); }
+    .indcad-title { font-weight:700; color:#0B6E4F; text-decoration:none; display:inline-block; max-width:60ch; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .indcad-meta { font-size:13px; margin-top:6px; color:#444; }
+    .indcad-score { background:#eef7f2; color:#0B6E4F; padding:6px 10px; border-radius:8px; font-weight:700; display:inline-block; min-width:48px; text-align:center; }
+    .indcad-loader { display:inline-block; width:18px; height:18px; border:3px solid rgba(0,0,0,0.08); border-top-color:#0B6E4F; border-radius:50%; animation:spin 1s linear infinite; margin-left:6px; }
+    @keyframes spin { to { transform:rotate(360deg); } }
+    @media (max-width:640px){ .indcad-row { flex-direction:column; } .indcad-item { flex-direction:column; } }
+  </style>
+</head>
+<body>
+
+<div id="indcad-widget">
+  <div class="indcad-card">
+    <h2 style="margin:0; color:#0B6E4F;">Find your NOC / TEER</h2>
+    <div class="indcad-small">Search by job title or paste duties — quick NOC suggestions & official IRCC links.</div>
+
+    <div style="margin-top:18px;">
+      <div class="indcad-row">
+        <div class="indcad-col"><input id="ic-title" class="indcad-input" placeholder="Type job title (e.g., Conference and event planners)"></div>
+        <button id="ic-search-title" class="indcad-btn">Search Title</button>
+      </div>
+    </div>
+
+    <div style="margin-top:18px;" class="indcad-small">Or paste job duties below</div>
+    <textarea id="ic-duties" class="indcad-textarea" placeholder="Paste job duties (e.g., plan and coordinate events, manage vendors, prepare budgets)"></textarea>
+
+    <div style="display:flex; gap:8px; align-items:center; margin-top:12px;">
+      <button id="ic-search-duties" class="indcad-btn">Search Duties</button>
+      <button id="ic-clear" class="indcad-btn secondary">Clear</button>
+      <div id="ic-status" style="margin-left:auto;"></div>
+    </div>
+  </div>
+
+  <div id="ic-results" class="indcad-results"></div>
+
+  <div id="ic-feedback-modal" class="indcad-card" style="display:none;">
+    <div class="indcad-small">If suggestion is wrong, type the correct title</div>
+    <input id="ic-feedback-choice" class="indcad-input" placeholder="Correct job title">
+    <button id="ic-feedback-submit" class="indcad-btn" style="margin-top:12px;">Submit Feedback</button>
+  </div>
+</div>
+
+<script>
+(function(){
+  const API_BASE = "https://indcad-api.onrender.com";
+  const $ = id => document.getElementById(id);
+  const titleInput = $('ic-title'), dutiesInput = $('ic-duties'), resultsDiv = $('ic-results'), statusDiv = $('ic-status');
+  function escapeHTML(s){ return String(s||"").replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+  function setStatus(msg){ statusDiv.innerHTML = msg || ""; }
+  function disableUI(dis){ $('ic-search-title').disabled = dis; $('ic-search-duties').disabled = dis; $('ic-clear').disabled = dis; }
+
+  async function apiPost(path, body){
+    disableUI(true); setStatus('<span class="indcad-loader"></span>');
+    try {
+      const res = await fetch(API_BASE + path, { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body) });
+      disableUI(false); setStatus('');
+      if(!res.ok) return {error: "Server error: " + res.status};
+      return await res.json();
+    } catch(e){ disableUI(false); setStatus(''); return {error:"Network error"}; }
+  }
+
+  function renderItem(r){
+    const title = escapeHTML(r.title || r.noc);
+    const snippet = escapeHTML((r.duties_snippet||"").slice(0,250));
+    const score = (r.score || 0).toFixed(2);
+    const url = r.source_file_url ? escapeHTML(r.source_file_url) : "";
+    return `
+      <div class="indcad-item" data-noc="${escapeHTML(r.noc)}">
+        <div>
+          ${url ? `<a class="indcad-title" href="${url}" target="_blank">${title}</a>` : `<span class="indcad-title">${title}</span>`}
+          <div class="indcad-meta">NOC: ${escapeHTML(r.noc)} • TEER: ${escapeHTML(r.teer||"—")}</div>
+          <div class="indcad-small" style="margin-top:8px;">${snippet}</div>
+          ${url ? `<div style="margin-top:8px;"><a href="${url}" target="_blank" class="indcad-small">Official NOC profile</a></div>` : ""}
+        </div>
+        <div style="text-align:right;">
+          <div class="indcad-score">${score}</div>
+          <button class="indcad-btn" style="margin-top:8px;">This is correct</button><br>
+          <button class="indcad-btn secondary" style="margin-top:6px;">No — wrong</button>
+        </div>
+      </div>
+    `;
+  }
+
+  function attachHandlers(){
+    document.querySelectorAll('.indcad-item').forEach(item=>{
+      const yes = item.querySelector('.indcad-btn:not(.secondary)');
+      const no = item.querySelector('.indcad-btn.secondary');
+      const noc = item.dataset.noc;
+      const title = item.querySelector('.indcad-title').textContent;
+      yes.onclick = async ()=>{ await apiPost('/feedback', { user_input: titleInput.value || dutiesInput.value, suggested_noc: noc, suggested_title: title, user_selected_noc: noc, user_selected_title: title, is_correct:true }); alert("Thanks! Recorded as correct."); };
+      no.onclick = ()=>{ $('ic-feedback-modal').style.display='block'; $('ic-feedback-choice').value = title; $('ic-feedback-choice').dataset.suggested_noc = noc; $('ic-feedback-choice').dataset.suggested_title = title; };
+    });
+  }
+
+  function renderResults(arr){ if(!arr || arr.length===0){ resultsDiv.innerHTML = `<div class="indcad-card">No results found.</div>`; return; } resultsDiv.innerHTML = arr.map(renderItem).join(''); attachHandlers(); }
+
+  $('ic-search-title').onclick = async ()=>{ const t = titleInput.value.trim(); if(!t) return alert("Enter a job title"); const json = await apiPost('/lookup-by-title',{title:t,k:6}); if(json.error) return alert(json.error); renderResults(json.results); };
+  $('ic-search-duties').onclick = async ()=>{ const d = dutiesInput.value.trim(); if(!d) return alert("Paste job duties"); const json = await apiPost('/match-noc',{query:d,k:6}); if(json.error) return alert(json.error); renderResults(json.results); };
+  $('ic-clear').onclick = ()=>{ titleInput.value=''; dutiesInput.value=''; resultsDiv.innerHTML=''; $('ic-feedback-modal').style.display='none'; };
+  $('ic-feedback-submit').onclick = async ()=>{ const correct = $('ic-feedback-choice').value.trim(); const suggested_noc = $('ic-feedback-choice').dataset.suggested_noc; const suggested_title = $('ic-feedback-choice').dataset.suggested_title; await apiPost('/feedback',{ user_input: titleInput.value || dutiesInput.value, suggested_noc, suggested_title, user_selected_title: correct, is_correct:false }); alert("Feedback submitted — thank you!"); $('ic-feedback-modal').style.display='none'; };
+
+})();
+</script>
+</body>
+</html>
