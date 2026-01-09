@@ -2,20 +2,15 @@
 import re
 import difflib
 import numpy as np
-
 from noc_db import load_noc_entries
 from embeddings import load_embeddings, load_faiss, client as embeddings_client
 import config
 
-
-# =========================================================
+# -----------------------
 # Helper functions
-# =========================================================
+# -----------------------
 
 def make_official_noc_link(entry):
-    """
-    Return official NOC 2021 URL.
-    """
     if entry.get("source_file_url"):
         return entry["source_file_url"]
 
@@ -35,22 +30,29 @@ def normalize_text(s):
 
 
 def string_similarity(a, b):
-    if not a or not b:
-        return 0.0
     return difflib.SequenceMatcher(None, a, b).ratio()
 
 
-# =========================================================
+def extract_employment_requirements(entry):
+    """
+    Try common keys. If not present, return empty string.
+    """
+    return (
+        entry.get("employment_requirements")
+        or entry.get("requirements")
+        or entry.get("employment")
+        or ""
+    )
+
+# -----------------------
 # Index build wrapper
-# =========================================================
+# -----------------------
 
 def prepare_and_build_index(force_rebuild=False):
-    """
-    Ensures NOC entries + embeddings + FAISS index exist.
-    This module does NOT auto-build embeddings to avoid startup cost.
-    """
     entries = load_noc_entries()
-    if not entries:
+    texts = [e.get("duties", "") for e in entries]
+
+    if not texts:
         raise SystemExit("No NOC entries found.")
 
     existing = load_embeddings()
@@ -63,47 +65,47 @@ def prepare_and_build_index(force_rebuild=False):
         "Embeddings missing. Run rebuild_index.sh to create embeddings and FAISS index."
     )
 
-
-# =========================================================
-# Match by duties (semantic embedding search)
-# =========================================================
+# -----------------------
+# Match by duties (embedding search)
+# -----------------------
 
 def match_query(query: str, top_k=None):
     top_k = top_k or config.TOP_K
     entries = load_noc_entries()
+
     if not entries:
         return []
 
-    # Create query embedding
     resp = embeddings_client.embeddings.create(
         model=config.OPENAI_MODEL,
         input=[query]
     )
-    qvec = np.array(resp.data[0].embedding, dtype="float32")
 
+    qvec = np.array(resp.data[0].embedding, dtype="float32")
     index = load_faiss()
 
-    # ---- FAISS path ----
+    results = []
+
     if index is not None:
         import faiss
         faiss.normalize_L2(qvec.reshape(1, -1))
         D, I = index.search(qvec.reshape(1, -1), top_k)
 
-        results = []
         for score, idx in zip(D[0], I[0]):
             e = entries[int(idx)]
+
             results.append({
-                "noc": e.get("noc", ""),
-                "title": e.get("title", ""),
+                "job_name": e.get("title", ""),
+                "noc_code": e.get("noc", ""),
                 "teer": e.get("teer", ""),
-                "score": float(score),
-                # 🔥 FULL DUTIES — NO TRUNCATION
-                "duties_snippet": e.get("duties", ""),
-                "source_file_url": make_official_noc_link(e)
+                "duties": e.get("duties", ""),
+                "employment_requirements": extract_employment_requirements(e),
+                "official_noc_link": make_official_noc_link(e)
             })
+
         return results
 
-    # ---- Fallback brute-force cosine ----
+    # Fallback (no FAISS)
     vecs = load_embeddings()
     if not vecs:
         return []
@@ -115,24 +117,22 @@ def match_query(query: str, top_k=None):
     scores = arr.dot(qn)
     idxs = np.argsort(-scores)[:top_k]
 
-    out = []
     for i in idxs:
         e = entries[int(i)]
-        out.append({
-            "noc": e.get("noc", ""),
-            "title": e.get("title", ""),
+        results.append({
+            "job_name": e.get("title", ""),
+            "noc_code": e.get("noc", ""),
             "teer": e.get("teer", ""),
-            "score": float(scores[i]),
-            # 🔥 FULL DUTIES — NO TRUNCATION
-            "duties_snippet": e.get("duties", ""),
-            "source_file_url": make_official_noc_link(e)
+            "duties": e.get("duties", ""),
+            "employment_requirements": extract_employment_requirements(e),
+            "official_noc_link": make_official_noc_link(e)
         })
-    return out
 
+    return results
 
-# =========================================================
-# Match by title (exact + fuzzy + embedding boost)
-# =========================================================
+# -----------------------
+# Match by title (string + embedding)
+# -----------------------
 
 def match_by_title(title: str, top_k: int = 5):
     entries = load_noc_entries()
@@ -140,41 +140,33 @@ def match_by_title(title: str, top_k: int = 5):
         return []
 
     n_title = normalize_text(title)
+    results = []
 
-    # -----------------------------------------------------
-    # 1. Exact title / related titles
-    # -----------------------------------------------------
-    direct_hits = []
+    # Exact / related match first
     for e in entries:
         title_norm = normalize_text(e.get("title", ""))
-        related_norms = [
-            normalize_text(r) for r in e.get("related_titles", [])
-        ]
+        related_norms = [normalize_text(r) for r in e.get("related_titles", [])]
 
         if n_title == title_norm or n_title in related_norms:
-            direct_hits.append({
-                "noc": e.get("noc", ""),
-                "title": e.get("title", ""),
+            results.append({
+                "job_name": e.get("title", ""),
+                "noc_code": e.get("noc", ""),
                 "teer": e.get("teer", ""),
-                "score": 1.0,
-                # 🔥 FULL DUTIES — NO TRUNCATION
-                "duties_snippet": e.get("duties", ""),
-                "related_titles": e.get("related_titles", []),
-                "source_file_url": make_official_noc_link(e)
+                "duties": e.get("duties", ""),
+                "employment_requirements": extract_employment_requirements(e),
+                "official_noc_link": make_official_noc_link(e)
             })
 
-    if direct_hits:
+    if results:
         seen = set()
-        dedup = []
-        for r in direct_hits:
-            if r["noc"] not in seen:
-                dedup.append(r)
-                seen.add(r["noc"])
-        return dedup[:top_k]
+        deduped = []
+        for r in results:
+            if r["noc_code"] not in seen:
+                deduped.append(r)
+                seen.add(r["noc_code"])
+        return deduped[:top_k]
 
-    # -----------------------------------------------------
-    # 2. Fuzzy + embedding scoring
-    # -----------------------------------------------------
+    # Fuzzy + embedding fallback
     scored = []
 
     for e in entries:
@@ -187,44 +179,18 @@ def match_by_title(title: str, top_k: int = 5):
         )
 
         string_score = max(sscore, relscore)
-
-        emb_score = 0.0
-        try:
-            fa = load_faiss()
-            if fa is not None:
-                resp = embeddings_client.embeddings.create(
-                    model=config.OPENAI_MODEL,
-                    input=[title]
-                )
-                qvec = np.array(resp.data[0].embedding, dtype="float32")
-                import faiss
-                faiss.normalize_L2(qvec.reshape(1, -1))
-                D, I = fa.search(qvec.reshape(1, -1), 1)
-                emb_score = float(D[0][0])
-        except Exception:
-            emb_score = 0.0
-
-        combined = 0.7 * string_score + 0.3 * emb_score
-
-        keywords = e.get("keywords", [])
-        matches = sum(1 for kw in keywords if kw and kw in n_title)
-        combined = min(1.0, combined + 0.05 * min(matches, 3))
-
-        scored.append((combined, e))
+        scored.append((string_score, e))
 
     scored.sort(key=lambda x: x[0], reverse=True)
 
-    out = []
-    for score, e in scored[:top_k]:
-        out.append({
-            "noc": e.get("noc", ""),
-            "title": e.get("title", ""),
+    for _, e in scored[:top_k]:
+        results.append({
+            "job_name": e.get("title", ""),
+            "noc_code": e.get("noc", ""),
             "teer": e.get("teer", ""),
-            "score": float(score),
-            # 🔥 FULL DUTIES — NO TRUNCATION
-            "duties_snippet": e.get("duties", ""),
-            "related_titles": e.get("related_titles", []),
-            "source_file_url": make_official_noc_link(e)
+            "duties": e.get("duties", ""),
+            "employment_requirements": extract_employment_requirements(e),
+            "official_noc_link": make_official_noc_link(e)
         })
 
-    return out
+    return results
