@@ -4,7 +4,7 @@ import uuid
 import sqlite3
 from pathlib import Path
 
-from flask import Flask, request, jsonify, abort
+from flask import Flask, request, jsonify, abort, send_from_directory
 from flask_cors import CORS
 from dotenv import load_dotenv
 
@@ -14,7 +14,7 @@ from decision_engine import run_decision_engine
 from pdf_generator import generate_indcad_pdf
 
 # ------------------------------------------------------------------
-# ENV + SECURITY
+# ENV
 # ------------------------------------------------------------------
 
 load_dotenv()
@@ -23,17 +23,8 @@ INDCAD_INTERNAL_KEY = os.getenv("INDCAD_INTERNAL_KEY")
 if not INDCAD_INTERNAL_KEY:
     raise RuntimeError("INDCAD_INTERNAL_KEY is not set")
 
-def verify_internal_key():
-    received = request.headers.get("X-INTERNAL-KEY")
-    print("EXPECTED KEY:", INDCAD_INTERNAL_KEY)
-    print("RECEIVED KEY:", received)
-
-    if received != INDCAD_INTERNAL_KEY:
-        abort(403)
-
-
 # ------------------------------------------------------------------
-# FLASK APP INIT
+# FLASK INIT  (MUST COME BEFORE ROUTES)
 # ------------------------------------------------------------------
 
 app = Flask(__name__)
@@ -46,7 +37,15 @@ CORS(
 )
 
 # ------------------------------------------------------------------
-# DATABASE SETUP
+# SECURITY
+# ------------------------------------------------------------------
+
+def verify_internal_key():
+    if request.headers.get("X-INTERNAL-KEY") != INDCAD_INTERNAL_KEY:
+        abort(403)
+
+# ------------------------------------------------------------------
+# DATABASE (FEEDBACK)
 # ------------------------------------------------------------------
 
 DB_PATH = Path(os.getenv("DATABASE_PATH", "./indcad.db"))
@@ -55,19 +54,19 @@ def init_db():
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     cur.execute("""
-    CREATE TABLE IF NOT EXISTS feedback (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        ts DATETIME DEFAULT CURRENT_TIMESTAMP,
-        user_input TEXT,
-        flow TEXT,
-        suggested_noc TEXT,
-        suggested_title TEXT,
-        user_selected_noc TEXT,
-        user_selected_title TEXT,
-        is_correct INTEGER DEFAULT 0,
-        notes TEXT,
-        source TEXT
-    )
+        CREATE TABLE IF NOT EXISTS feedback (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts DATETIME DEFAULT CURRENT_TIMESTAMP,
+            user_input TEXT,
+            flow TEXT,
+            suggested_noc TEXT,
+            suggested_title TEXT,
+            user_selected_noc TEXT,
+            user_selected_title TEXT,
+            is_correct INTEGER DEFAULT 0,
+            notes TEXT,
+            source TEXT
+        )
     """)
     conn.commit()
     conn.close()
@@ -81,13 +80,13 @@ init_db()
 try:
     prepare_and_build_index(force_rebuild=False)
 except SystemExit as e:
-    print("WARNING during prepare:", e)
+    print("WARNING during index prepare:", e)
 
 # ------------------------------------------------------------------
 # HEALTH
 # ------------------------------------------------------------------
 
-@app.route('/health', methods=['GET'])
+@app.route("/health", methods=["GET"])
 def health():
     return jsonify({"status": "ok"})
 
@@ -95,31 +94,31 @@ def health():
 # NOC LOOKUP
 # ------------------------------------------------------------------
 
-@app.route('/lookup-by-title', methods=['POST'])
+@app.route("/lookup-by-title", methods=["POST"])
 def lookup_by_title():
     data = request.json or {}
-    title = (data.get('title') or "").strip()
+    title = (data.get("title") or "").strip()
     if not title:
         return jsonify({"error": "title required"}), 400
 
-    k = int(data.get('k', config.TOP_K))
+    k = int(data.get("k", config.TOP_K))
     return jsonify({"results": match_by_title(title, top_k=k)})
 
-@app.route('/match-noc', methods=['POST'])
+@app.route("/match-noc", methods=["POST"])
 def match_noc():
     data = request.json or {}
-    q = data.get('query') or data.get('job_title') or data.get('duties') or ""
+    q = data.get("query") or data.get("job_title") or data.get("duties") or ""
     if not q:
         return jsonify({"error": "Provide query"}), 400
 
-    k = int(data.get('k', config.TOP_K))
+    k = int(data.get("k", config.TOP_K))
     return jsonify({"results": match_query(q, top_k=k)})
 
 # ------------------------------------------------------------------
 # FEEDBACK
 # ------------------------------------------------------------------
 
-@app.route('/feedback', methods=['POST'])
+@app.route("/feedback", methods=["POST"])
 def feedback():
     data = request.json or {}
     conn = sqlite3.connect(DB_PATH)
@@ -132,15 +131,15 @@ def feedback():
         )
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
-        data.get('user_input'),
-        data.get('flow'),
-        data.get('suggested_noc'),
-        data.get('suggested_title'),
-        data.get('user_selected_noc'),
-        data.get('user_selected_title'),
-        1 if data.get('is_correct') else 0,
-        data.get('notes'),
-        data.get('source')
+        data.get("user_input"),
+        data.get("flow"),
+        data.get("suggested_noc"),
+        data.get("suggested_title"),
+        data.get("user_selected_noc"),
+        data.get("user_selected_title"),
+        1 if data.get("is_correct") else 0,
+        data.get("notes"),
+        data.get("source")
     ))
     conn.commit()
     conn.close()
@@ -150,7 +149,7 @@ def feedback():
 # DECISION ENGINE (INTERNAL)
 # ------------------------------------------------------------------
 
-@app.route('/decision-engine', methods=['POST'])
+@app.route("/decision-engine", methods=["POST"])
 def decision_engine():
     verify_internal_key()
 
@@ -173,7 +172,7 @@ def decision_engine():
 # PDF GENERATION (INTERNAL)
 # ------------------------------------------------------------------
 
-@app.route('/generate-pdf', methods=['POST'])
+@app.route("/generate-pdf", methods=["POST"])
 def generate_pdf():
     verify_internal_key()
 
@@ -204,9 +203,27 @@ def generate_pdf():
     })
 
 # ------------------------------------------------------------------
-# ENTRY
+# PDF FILE SERVING  (CRITICAL FIX)
 # ------------------------------------------------------------------
 
-if __name__ == '__main__':
+@app.route("/output_pdfs/<path:filename>", methods=["GET"])
+def serve_pdf(filename):
+    pdf_dir = os.path.join(os.getcwd(), "output_pdfs")
+    file_path = os.path.join(pdf_dir, filename)
+
+    if not os.path.exists(file_path):
+        abort(404)
+
+    return send_from_directory(
+        pdf_dir,
+        filename,
+        as_attachment=True
+    )
+
+# ------------------------------------------------------------------
+# ENTRY POINT
+# ------------------------------------------------------------------
+
+if __name__ == "__main__":
     port = int(os.getenv("PORT", 5001))
     app.run(host="0.0.0.0", port=port, debug=True)
