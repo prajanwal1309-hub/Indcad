@@ -14,3 +14,39 @@
 2025-12-11 11:27:43,908 INFO Loaded 515 NOC entries.
 2025-12-11 11:27:43,912 INFO Loaded 515 NOC entries.
 2025-12-11 11:27:43,913 INFO Loaded 515 NOC entries.
+2025-12-11 19:15:54,325 INFO HTTP Request: POST https://api.openai.com/v1/embeddings "HTTP/1.1 404 Not Found"
+2025-12-11 19:15:54,331 ERROR match-noc error: Error code: 404 - {'error': {'message': 'The model `text-embedding-3-` does not exist or you do not have access to it.', 'type': 'invalid_request_error', 'param': None, 'code': 'model_not_found'}}
+Traceback (most recent call last):
+  File "/Users/pranavrajnwal/PycharmProjects/Indcad/app.py", line 121, in match_noc
+  File "/Users/pranavrajnwal/PycharmProjects/Indcad/matcher.py", line 239, in match_query
+  File "/Users/pranavrajnwal/PycharmProjects/Indcad/.venv/lib/python3.10/site-packages/openai/resources/embeddings.py", line 132, in create
+    return self._post(
+  File "/Users/pranavrajnwal/PycharmProjects/Indcad/.venv/lib/python3.10/site-packages/openai/_base_client.py", line 1259, in post
+    return cast(ResponseT, self.request(cast_to, opts, stream=stream, stream_cls=stream_cls))
+  File "/Users/pranavrajnwal/PycharmProjects/Indcad/.venv/lib/python3.10/site-packages/openai/_base_client.py", line 1047, in request
+    raise self._make_status_error_from_response(err.response) from None
+openai.NotFoundError: Error code: 404 - {'error': {'message': 'The model `text-embedding-3-` does not exist or you do not have access to it.', 'type': 'invalid_request_error', 'param': None, 'code': 'model_not_found'}}
+2025-12-11 19:17:18,837 INFO HTTP Request: POST https://api.openai.com/v1/embeddings "HTTP/1.1 404 Not Found"
+2025-12-11 19:17:18,840 ERROR match-noc error: Error code: 404 - {'error': {'message': 'The model `text-embedding-3-` does not exist or you do not have access to it.', 'type': 'invalid_request_error', 'param': None, 'code': 'model_not_found'}}
+Traceback (most recent call last):
+  File "/Users/pranavrajnwal/PycharmProjects/Indcad/app.py", line 121, in match_noc
+  File "/Users/pranavrajnwal/PycharmProjects/Indcad/matcher.py", line 239, in match_query
+  File "/Users/pranavrajnwal/PycharmProjects/Indcad/.venv/lib/python3.10/site-packages/openai/resources/embeddings.py", line 132, in create
+    return self._post(
+  File "/Users/pranavrajnwal/PycharmProjects/Indcad/.venv/lib/python3.10/site-packages/openai/_base_client.py", line 1259, in post
+    return cast(ResponseT, self.request(cast_to, opts, stream=stream, stream_cls=stream_cls))
+  File "/Users/pranavrajnwal/PycharmProjects/Indcad/.venv/lib/python3.10/site-packages/openai/_base_client.py", line 1047, in request
+    raise self._make_status_error_from_response(err.response) from None
+openai.NotFoundError: Error code: 404 - {'error': {'message': 'The model `text-embedding-3-` does not exist or you do not have access to it.', 'type': 'invalid_request_error', 'param': None, 'code': 'model_not_found'}}
+2025-12-11 19:21:09,514 INFO HTTP Request: POST https://api.openai.com/v1/embeddings "HTTP/1.1 404 Not Found"
+2025-12-11 19:21:09,518 ERROR match-noc error: Error code: 404 - {'error': {'message': 'The model `text-embedding-3-` does not exist or you do not have access to it.', 'type': 'invalid_request_error', 'param': None, 'code': 'model_not_found'}}
+Traceback (most recent call last):
+  File "/Users/pranavrajnwal/PycharmProjects/Indcad/app.py", line 121, in match_noc
+  File "/Users/pranavrajnwal/PycharmProjects/Indcad/matcher.py", line 239, in match_query
+  File "/Users/pranavrajnwal/PycharmProjects/Indcad/.venv/lib/python3.10/site-packages/openai/resources/embeddings.py", line 132, in create
+    return self._post(
+  File "/Users/pranavrajnwal/PycharmProjects/Indcad/.venv/lib/python3.10/site-packages/openai/_base_client.py", line 1259, in post
+    return cast(ResponseT, self.request(cast_to, opts, stream=stream, stream_cls=stream_cls))
+  File "/Users/pranavrajnwal/PycharmProjects/Indcad/.venv/lib/python3.10/site-packages/openai/_base_client.py", line 1047, in request
+    raise self._make_status_error_from_response(err.response) from None
+openai.NotFoundError: Error code: 404 - {'error': {'message': 'The model `text-embedding-3-` does not exist or you do not have access to it.', 'type': 'invalid_request_error', 'param': None, 'code': 'model_not_found'}}

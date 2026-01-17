@@ -1,0 +1,24 @@
+.venv
+__pycache__/
+*.pyc
+.env
+.DS_Store
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Logs
+*.log
+
+# Embeddings / Indexes (GENERATED)
+noc_embeddings.json
+noc_faiss.index
+title_embeddings.json
+title_faiss.index
+
+# Env
+.env
+
+
+
