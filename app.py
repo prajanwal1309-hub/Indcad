@@ -1,4 +1,5 @@
 # app.py
+
 import os
 import uuid
 import sqlite3
@@ -23,8 +24,10 @@ INDCAD_INTERNAL_KEY = os.getenv("INDCAD_INTERNAL_KEY")
 if not INDCAD_INTERNAL_KEY:
     raise RuntimeError("INDCAD_INTERNAL_KEY is not set")
 
+DB_PATH = Path(os.getenv("DATABASE_PATH", "./indcad.db"))
+
 # ------------------------------------------------------------------
-# FLASK INIT  (MUST COME BEFORE ROUTES)
+# FLASK INIT  (SINGLE INSTANCE — NON-NEGOTIABLE)
 # ------------------------------------------------------------------
 
 app = Flask(__name__)
@@ -47,8 +50,6 @@ def verify_internal_key():
 # ------------------------------------------------------------------
 # DATABASE (FEEDBACK)
 # ------------------------------------------------------------------
-
-DB_PATH = Path(os.getenv("DATABASE_PATH", "./indcad.db"))
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
@@ -91,13 +92,14 @@ def health():
     return jsonify({"status": "ok"})
 
 # ------------------------------------------------------------------
-# NOC LOOKUP
+# PUBLIC — NOC LOOKUP
 # ------------------------------------------------------------------
 
 @app.route("/lookup-by-title", methods=["POST"])
 def lookup_by_title():
     data = request.json or {}
     title = (data.get("title") or "").strip()
+
     if not title:
         return jsonify({"error": "title required"}), 400
 
@@ -108,6 +110,7 @@ def lookup_by_title():
 def match_noc():
     data = request.json or {}
     q = data.get("query") or data.get("job_title") or data.get("duties") or ""
+
     if not q:
         return jsonify({"error": "Provide query"}), 400
 
@@ -115,12 +118,13 @@ def match_noc():
     return jsonify({"results": match_query(q, top_k=k)})
 
 # ------------------------------------------------------------------
-# FEEDBACK
+# PUBLIC — FEEDBACK
 # ------------------------------------------------------------------
 
 @app.route("/feedback", methods=["POST"])
 def feedback():
     data = request.json or {}
+
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     cur.execute("""
@@ -143,49 +147,69 @@ def feedback():
     ))
     conn.commit()
     conn.close()
+
     return jsonify({"ok": True})
 
 # ------------------------------------------------------------------
-# DECISION ENGINE (INTERNAL)
+# INTERNAL — DECISION ENGINE (CANONICAL DTO ONLY)
 # ------------------------------------------------------------------
 
-@app.route("/decision-engine", methods=["POST"])
-def decision_engine():
+@app.route("/internal/decision-engine", methods=["POST"])
+def decision_engine_internal():
     verify_internal_key()
 
     payload = request.get_json(silent=True)
-    if not payload or "snapshot" not in payload or "context" not in payload:
-        return jsonify({"status": "error", "message": "Invalid payload"}), 400
+
+    if (
+        not payload
+        or payload.get("meta", {}).get("version") != "decision_payload_v1"
+        or "pathways_snapshot" not in payload
+        or "manual_context" not in payload
+    ):
+        return jsonify({
+            "status": "error",
+            "message": "Invalid decision payload"
+        }), 400
 
     try:
-        result = run_decision_engine(payload)
+        decision_output = run_decision_engine(payload)
     except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
+        return jsonify({
+            "status": "error",
+            "message": str(e)
+        }), 500
 
     return jsonify({
         "status": "success",
         "engine_version": "v1",
-        "result": result
+        "decision_output": decision_output
     })
 
 # ------------------------------------------------------------------
-# PDF GENERATION (INTERNAL)
+# INTERNAL — PDF GENERATION
 # ------------------------------------------------------------------
 
-@app.route("/generate-pdf", methods=["POST"])
-def generate_pdf():
+@app.route("/internal/generate-pdf", methods=["POST"])
+def generate_pdf_internal():
     verify_internal_key()
 
     payload = request.get_json(silent=True)
+
     if not payload:
-        return jsonify({"status": "error", "message": "Invalid JSON"}), 400
+        return jsonify({
+            "status": "error",
+            "message": "Invalid JSON"
+        }), 400
 
-    engine_result = payload.get("engine_result")
-    snapshot = payload.get("snapshot")
-    context = payload.get("context")
+    decision_output = payload.get("decision_output")
+    pathways_snapshot = payload.get("pathways_snapshot")
+    manual_context = payload.get("manual_context")
 
-    if not engine_result or not snapshot or not context:
-        return jsonify({"status": "error", "message": "Missing data"}), 400
+    if not decision_output or not pathways_snapshot or not manual_context:
+        return jsonify({
+            "status": "error",
+            "message": "Missing required data"
+        }), 400
 
     os.makedirs("output_pdfs", exist_ok=True)
 
@@ -193,9 +217,17 @@ def generate_pdf():
     output_path = os.path.join("output_pdfs", filename)
 
     try:
-        generate_indcad_pdf(output_path, engine_result, snapshot, context)
+        generate_indcad_pdf(
+            output_path,
+            decision_output,
+            pathways_snapshot,
+            manual_context
+        )
     except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
+        return jsonify({
+            "status": "error",
+            "message": str(e)
+        }), 500
 
     return jsonify({
         "status": "success",
@@ -203,7 +235,7 @@ def generate_pdf():
     })
 
 # ------------------------------------------------------------------
-# PDF FILE SERVING  (CRITICAL FIX)
+# PUBLIC — PDF FILE SERVING
 # ------------------------------------------------------------------
 
 @app.route("/output_pdfs/<path:filename>", methods=["GET"])
@@ -226,4 +258,4 @@ def serve_pdf(filename):
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5001))
-    app.run(host="0.0.0.0", port=port, debug=True)
+    app.run(host="0.0.0.0", port=port, debug=False)
